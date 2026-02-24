@@ -1,7 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { Component, DestroyRef, OnInit, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { NgDiagramComponent, initializeModel } from 'ng-diagram';
+import { NgDiagramComponent, initializeModel, provideNgDiagram } from 'ng-diagram';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 
 type GraphResponse = {
@@ -21,10 +21,11 @@ const fallbackPosition = (idx: number) => ({
   selector: 'app-graph',
   standalone: true,
   imports: [CommonModule, NgDiagramComponent],
+  providers: [provideNgDiagram()],
   template: `
     <div class="graph-shell">
       <div class="error" *ngIf="error">{{ error }}</div>
-      <ng-diagram [model]="model" />
+      <ng-diagram [model]="model"></ng-diagram>
     </div>
   `,
   styles: [

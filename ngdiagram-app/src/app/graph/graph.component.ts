@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, Injector, OnInit, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { NgDiagramComponent, initializeModel, provideNgDiagram } from 'ng-diagram';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -51,11 +51,12 @@ const fallbackPosition = (idx: number) => ({
 })
 export class GraphComponent implements OnInit {
   private readonly http = inject(HttpClient);
-  model = initializeModel({ nodes: [], edges: [] });
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly injector = inject(Injector);
+  model = initializeModel({ nodes: [], edges: [] }, this.injector);
   error?: string;
 
   ngOnInit(): void {
-    const destroyRef = inject(DestroyRef);
     const buildModel = (graph: GraphResponse) => {
       const pos = new Map(graph.layoutHints?.map((hint) => [hint.id, { x: hint.x, y: hint.y }]) ?? []);
       this.model = initializeModel({
@@ -70,20 +71,20 @@ export class GraphComponent implements OnInit {
           target: l.target,
           data: { label: l.label ?? '', channel: l.channel ?? '' },
         })),
-      });
+      }, this.injector);
       this.error = undefined;
     };
 
     this.http
       .get<GraphResponse>('/api/graph?includeLayout=true')
-      .pipe(takeUntilDestroyed(destroyRef))
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: buildModel,
         error: () => {
           // Fallback to bundled mock if API not available yet.
           this.http
             .get<GraphResponse>('assets/graph-mock.json')
-            .pipe(takeUntilDestroyed(destroyRef))
+            .pipe(takeUntilDestroyed(this.destroyRef))
             .subscribe({
               next: (graph) => {
                 buildModel(graph);
@@ -92,7 +93,7 @@ export class GraphComponent implements OnInit {
               error: (err) => {
                 const detail = err?.message ?? 'unknown error';
                 this.error = `Unable to load graph. Please check your connection and try again. (${detail})`;
-                this.model = initializeModel({ nodes: [], edges: [] });
+                this.model = initializeModel({ nodes: [], edges: [] }, this.injector);
               },
             });
         },

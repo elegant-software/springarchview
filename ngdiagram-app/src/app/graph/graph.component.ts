@@ -1,7 +1,7 @@
 import { CommonModule } from '@angular/common';
 import { Component, DestroyRef, OnInit, inject } from '@angular/core';
-import { HttpClient, provideHttpClient } from '@angular/common/http';
-import { NgDiagramComponent, initializeModel, provideNgDiagram, type DiagramModel } from 'ng-diagram';
+import { HttpClient } from '@angular/common/http';
+import { NgDiagramComponent, initializeModel } from 'ng-diagram';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 
 type GraphResponse = {
@@ -21,7 +21,6 @@ const fallbackPosition = (idx: number) => ({
   selector: 'app-graph',
   standalone: true,
   imports: [CommonModule, NgDiagramComponent],
-  providers: [provideNgDiagram(), provideHttpClient()],
   template: `
     <div class="graph-shell">
       <div class="error" *ngIf="error">{{ error }}</div>
@@ -51,36 +50,50 @@ const fallbackPosition = (idx: number) => ({
 })
 export class GraphComponent implements OnInit {
   private readonly http = inject(HttpClient);
-  model: DiagramModel = initializeModel({ nodes: [], edges: [] });
+  model = initializeModel({ nodes: [], edges: [] });
   error?: string;
 
   ngOnInit(): void {
     const destroyRef = inject(DestroyRef);
+    const buildModel = (graph: GraphResponse) => {
+      const pos = new Map(graph.layoutHints?.map((hint) => [hint.id, { x: hint.x, y: hint.y }]) ?? []);
+      this.model = initializeModel({
+        nodes: graph.nodes.map((n, idx) => ({
+          id: n.id,
+          position: pos.get(n.id) ?? fallbackPosition(idx),
+          data: { label: n.name, type: n.type, status: n.status },
+        })),
+        edges: graph.links.map((l, idx) => ({
+          id: l.id ?? `edge-${idx}`,
+          source: l.source,
+          target: l.target,
+          data: { label: l.label ?? '', channel: l.channel ?? '' },
+        })),
+      });
+      this.error = undefined;
+    };
+
     this.http
       .get<GraphResponse>('/api/graph?includeLayout=true')
       .pipe(takeUntilDestroyed(destroyRef))
       .subscribe({
-        next: (graph) => {
-          const pos = new Map(graph.layoutHints?.map((hint) => [hint.id, { x: hint.x, y: hint.y }]) ?? []);
-          this.model = initializeModel({
-            nodes: graph.nodes.map((n, idx) => ({
-              id: n.id,
-              position: pos.get(n.id) ?? fallbackPosition(idx),
-              data: { label: n.name, type: n.type, status: n.status },
-            })),
-            edges: graph.links.map((l, idx) => ({
-              id: l.id ?? `edge-${idx}`,
-              source: l.source,
-              target: l.target,
-              data: { label: l.label ?? '', channel: l.channel ?? '' },
-            })),
-          });
-          this.error = undefined;
-        },
-        error: (err) => {
-          const detail = err?.message ?? 'unknown error';
-          this.error = `Unable to load graph. Please check your connection and try again. (${detail})`;
-          this.model = initializeModel({ nodes: [], edges: [] });
+        next: buildModel,
+        error: () => {
+          // Fallback to bundled mock if API not available yet.
+          this.http
+            .get<GraphResponse>('assets/graph-mock.json')
+            .pipe(takeUntilDestroyed(destroyRef))
+            .subscribe({
+              next: (graph) => {
+                buildModel(graph);
+                this.error = 'Using bundled mock data (API not reachable).';
+              },
+              error: (err) => {
+                const detail = err?.message ?? 'unknown error';
+                this.error = `Unable to load graph. Please check your connection and try again. (${detail})`;
+                this.model = initializeModel({ nodes: [], edges: [] });
+              },
+            });
         },
       });
   }

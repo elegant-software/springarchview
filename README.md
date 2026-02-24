@@ -66,6 +66,86 @@ Error responses:
 - Use `links` as connectors; map `channel` to line style (solid HTTP, dashed async, dotted broker).  
 - If `layoutHints` is present and `includeLayout=true`, seed diagram coordinates for reproducible layouts; otherwise allow ngdiagram’s auto layout.
 
+## Reference implementation (ng-diagram v1.0.0, Angular 18+)
+The snippet below shows how to render the `/api/graph` payload with the latest **ng-diagram** release. It uses Angular standalone components and the library’s `initializeModel` helper:
+
+```bash
+npm install ng-diagram@latest @angular/core@18 @angular/common@18 @angular/platform-browser@18 rxjs zone.js
+```
+
+```typescript
+// graph.component.ts
+import { Component, OnInit, inject } from '@angular/core';
+import { HttpClient, provideHttpClient } from '@angular/common/http';
+import { NgDiagramComponent, initializeModel, provideNgDiagram, type DiagramModel } from 'ng-diagram';
+
+type GraphResponse = {
+  nodes: { id: string; name: string; type: string; status: string }[];
+  links: { id: string; source: string; target: string; label?: string; channel?: string }[];
+  layoutHints?: { id: string; x: number; y: number }[];
+};
+
+// Deterministic spread used only when backend layout hints are absent.
+const DEFAULT_POSITION_SPREAD = 160;
+const fallbackPosition = (idx: number) => ({
+  x: DEFAULT_POSITION_SPREAD * ((idx % 3) + 1),
+  y: DEFAULT_POSITION_SPREAD * (Math.floor(idx / 3) + 1),
+});
+
+@Component({
+  selector: 'app-graph',
+  standalone: true,
+  imports: [NgDiagramComponent],
+  providers: [provideNgDiagram(), provideHttpClient()],
+  template: `
+    <div class="graph-shell">
+      <ng-diagram [model]="model" />
+    </div>
+  `,
+  styles: [
+    `
+      .graph-shell {
+        display: flex;
+        height: 100vh;
+        background: #0d1117;
+      }
+    `,
+  ],
+})
+export class GraphComponent implements OnInit {
+  private readonly http = inject(HttpClient);
+  model: DiagramModel = initializeModel({ nodes: [], edges: [] });
+
+  ngOnInit(): void {
+    this.http.get<GraphResponse>('/api/graph?includeLayout=true').subscribe((graph) => {
+      const pos = new Map(graph.layoutHints?.map((hint) => [hint.id, { x: hint.x, y: hint.y }]) ?? []);
+      this.model = initializeModel({
+        nodes: graph.nodes.map((n, idx) => ({
+          id: n.id,
+          position: pos.get(n.id) ?? fallbackPosition(idx),
+          data: { label: n.name, type: n.type, status: n.status },
+        })),
+        edges: graph.links.map((l, idx) => ({
+          id: l.id ?? `edge-${idx}`,
+          source: l.source,
+          target: l.target,
+          data: { label: l.label ?? '', channel: l.channel ?? '' },
+        })),
+      });
+    });
+  }
+}
+```
+
+Style import (required):
+
+```scss
+/* src/styles.scss */
+@import 'ng-diagram/styles.css';
+```
+
+Mock API response for local dev lives in [`graph-mock.json`](./graph-mock.json); serve it via `json-server`, a simple Express stub, or Angular’s `http-server` to test the diagram quickly.
+
 ## Next steps
 - Replace mock data with Modulith metadata (Spring Modulith `ApplicationModules`) and tracing data.  
 - Add WebSocket/SSE push from the backend to stream updates to ngdiagram for near-real-time graphs.

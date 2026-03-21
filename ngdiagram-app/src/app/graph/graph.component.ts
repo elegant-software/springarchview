@@ -5,26 +5,27 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import {
   NgDiagramBackgroundComponent,
   NgDiagramComponent,
+  NgDiagramNodeTemplateMap,
   type Edge,
   NgDiagramMinimapComponent,
+  NgDiagramService,
   NgDiagramSelectionService,
-  NgDiagramViewportService,
   type Node,
   initializeModel,
   provideNgDiagram,
 } from 'ng-diagram';
-import { DiagramApiService, type DiagramNode, type DiagramResponse } from './services/diagram-api.service';
+import { RELATIONSHIP_PORT_RENDER_SETTINGS, type RelationshipPortMarker } from './relationship-port-settings';
+import { DiagramApiService, type DiagramLink, type DiagramNode, type DiagramResponse } from './services/diagram-api.service';
+import { EntityNodeComponent, type EntityNodeTemplateData } from './entity-node.component';
 
 const DEFAULT_POSITION_SPREAD = 220;
+const ENTITY_NODE_SIZE = { width: 220, height: 88 };
 const fallbackPosition = (idx: number) => ({
   x: DEFAULT_POSITION_SPREAD * ((idx % 3) + 1),
   y: 140 + 150 * Math.floor(idx / 3),
 });
 
-type DiagramNodeData = {
-  label: string;
-  entity: DiagramNode;
-};
+type DiagramNodeData = EntityNodeTemplateData;
 
 type DiagramEdgeData = {
   label: string;
@@ -37,6 +38,96 @@ type DiagramEdgeData = {
     owningSide?: boolean;
     fetch?: 'EAGER' | 'LAZY';
   };
+};
+
+type EntityPort = EntityNodeTemplateData['leftPorts'][number];
+type DiagramViewport = { x: number; y: number; scale: number };
+
+const extractCardinalityParts = (cardinality?: string) => {
+  if (!cardinality) {
+    return { source: '1', target: '1' };
+  }
+
+  const [sourceRaw, targetRaw] = cardinality.split(':').map((part) => part?.trim()).filter(Boolean);
+  return {
+    source: sourceRaw || '1',
+    target: targetRaw || '1',
+  };
+};
+
+const findNodeField = (node: DiagramNode | undefined, fieldName?: string) =>
+  node?.metadata?.fields?.find((field) => field.name === fieldName);
+
+const resolveEndpointMarker = (
+  graph: DiagramResponse,
+  link: DiagramLink,
+  side: 'source' | 'target',
+): RelationshipPortMarker => {
+  const sourceNode = graph.nodes.find((node) => node.id === link.source);
+  const targetNode = graph.nodes.find((node) => node.id === link.target);
+  const sourceField = findNodeField(sourceNode, link.metadata?.sourceField);
+  const targetField = findNodeField(targetNode, link.metadata?.targetField);
+  const relationType = link.metadata?.relationType;
+
+  switch (relationType) {
+    case 'ManyToOne':
+      return side === 'source' ? '*' : sourceField?.nullable === false ? '1' : '0';
+    case 'OneToMany':
+      return side === 'source' ? targetField?.nullable === false ? '1' : '0' : '*';
+    case 'ManyToMany':
+      return '*';
+    case 'OneToOne':
+      return side === 'source'
+        ? targetField?.nullable === false ? '1' : '0'
+        : sourceField?.nullable === false ? '1' : '0';
+    default: {
+      const parts = extractCardinalityParts(link.metadata?.cardinality);
+      const raw = side === 'source' ? parts.source : parts.target;
+      return /^(N|M|\*)$/i.test(raw) ? '*' : raw === '0' ? '0' : '1';
+    }
+  }
+};
+
+const buildPortOffset = (index: number, total: number) => {
+  if (total <= 1) return 50;
+  const start = 30;
+  const end = 70;
+  return start + ((end - start) / (total - 1)) * index;
+};
+
+const buildEntityPorts = (graph: DiagramResponse, entity: DiagramNode) => {
+  const incoming = graph.links.filter((link) => link.target === entity.id);
+  const outgoing = graph.links.filter((link) => link.source === entity.id);
+
+  const leftPorts: EntityPort[] = incoming.map((link, index) => {
+    return {
+      id: `${link.id}-target`,
+      side: 'left',
+      type: 'target',
+      label: resolveEndpointMarker(graph, link, 'target') as EntityPort['label'],
+      offsetPercent: buildPortOffset(index, incoming.length),
+      title: `${link.source} -> ${link.target} (${link.metadata?.cardinality || '1:1'})`,
+    };
+  });
+
+  const rightPorts: EntityPort[] = outgoing.map((link, index) => {
+    return {
+      id: `${link.id}-source`,
+      side: 'right',
+      type: 'source',
+      label: resolveEndpointMarker(graph, link, 'source') as EntityPort['label'],
+      offsetPercent: buildPortOffset(index, outgoing.length),
+      title: `${link.source} -> ${link.target} (${link.metadata?.cardinality || '1:1'})`,
+    };
+  });
+
+  return { leftPorts, rightPorts };
+};
+
+const STATIC_VIEWPORT: DiagramViewport = {
+  x: 38,
+  y: 185,
+  scale: 0.68,
 };
 
 @Component({
@@ -63,7 +154,14 @@ type DiagramEdgeData = {
               <p>POST JPA entities and relationships to <code>/api/diagram</code> to render the model.</p>
             </div>
           </div>
-          <ng-diagram [model]="model" (diagramInit)="diagramReady = true">
+          <svg class="relationship-overlay" *ngIf="graphState() as graph" viewBox="0 0 1600 900" aria-hidden="true">
+            <g [attr.transform]="overlayTransform">
+              <ng-container *ngFor="let link of graph.links">
+                <path class="relationship-overlay__path" [attr.d]="buildRelationshipPath(graph, link)"></path>
+              </ng-container>
+            </g>
+          </svg>
+          <ng-diagram [model]="model" [nodeTemplateMap]="nodeTemplateMap" (diagramInit)="diagramReady = true">
             <ng-diagram-background type="dots"></ng-diagram-background>
             <ng-diagram-minimap
               *ngIf="diagramReady"
@@ -277,15 +375,36 @@ type DiagramEdgeData = {
         overflow: hidden;
       }
 
+      .relationship-overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 1;
+      }
+
+      .relationship-overlay__path {
+        fill: none;
+        stroke: #4f46e5;
+        stroke-width: 3;
+        stroke-linecap: round;
+      }
+
       ng-diagram {
         flex: 1 1 auto;
         min-width: 0;
+        z-index: 2;
         --ngd-diagram-background-color: #ffffff;
         --ngd-minimap-background: rgba(255, 255, 255, 0.98);
         --ngd-minimap-border-color: rgba(148, 163, 184, 0.35);
-        --ngd-default-edge-stroke: var(--cui-primary);
-        --ngd-default-edge-stroke-hover: #1d4ed8;
+        --ngd-default-edge-stroke: #4f46e5;
+        --ngd-default-edge-stroke-hover: #4338ca;
         --ngd-default-edge-stroke-selected: #0f172a;
+      }
+
+      ng-diagram ::ng-deep svg path {
+        stroke-width: 2.25px;
       }
 
       .panel--sidebar {
@@ -465,8 +584,10 @@ export class GraphComponent implements OnInit {
   private readonly destroyRef = inject(DestroyRef);
   private readonly injector = inject(Injector);
   private readonly api = inject(DiagramApiService);
+  private readonly diagramService = inject(NgDiagramService);
   private readonly selectionService = inject(NgDiagramSelectionService);
-  private readonly viewportService = inject(NgDiagramViewportService);
+  readonly nodeTemplateMap = new NgDiagramNodeTemplateMap([['entity-node', EntityNodeComponent]]);
+  readonly overlayTransform = `translate(${STATIC_VIEWPORT.x} ${STATIC_VIEWPORT.y}) scale(${STATIC_VIEWPORT.scale})`;
 
   model = initializeModel({ nodes: [], edges: [] }, this.injector);
   graphState = signal<DiagramResponse | undefined>(undefined);
@@ -487,46 +608,57 @@ export class GraphComponent implements OnInit {
   diagramReady = false;
 
   ngOnInit(): void {
-    const buildModel = (graph: DiagramResponse) => {
+    const buildModel = async (graph: DiagramResponse) => {
       this.hasConnected = true;
       this.hasNodes = graph.nodes.length > 0;
       this.graphState.set(graph);
 
-      this.model.updateNodes(
-        graph.nodes.map((node, idx) => ({
-          id: node.id,
-          position: node.position ?? fallbackPosition(idx),
-          data: {
-            label: node.name,
-            entity: node,
-          },
-        })),
-      );
+      await this.diagramService.transaction(
+        () => {
+          this.model.updateNodes(
+            graph.nodes.map((node, idx) => ({
+              id: node.id,
+              position: node.position ?? fallbackPosition(idx),
+              size: ENTITY_NODE_SIZE,
+              autoSize: false,
+              type: 'entity-node',
+              data: {
+                label: node.name,
+                entity: node,
+                ...buildEntityPorts(graph, node),
+              },
+            })),
+          );
 
-      this.model.updateEdges(
-        graph.links.map((link, idx) => ({
-          id: link.id ?? `edge-${idx}`,
-          source: link.source,
-          target: link.target,
-          data: {
-            label: link.label ?? '',
-            channel: link.channel ?? '',
-            relation: link.metadata,
-          },
-        })),
+          this.model.updateEdges(
+            graph.links.map((link, idx) => ({
+              id: link.id ?? `edge-${idx}`,
+              source: link.source,
+              target: link.target,
+              routing: 'bezier',
+              data: {
+                label: link.label ?? '',
+                channel: link.channel ?? '',
+                relation: link.metadata,
+              },
+            })),
+          );
+        },
+        { waitForMeasurements: true },
       );
 
       this.error = undefined;
-      setTimeout(() => {
-        this.viewportService.zoomToFit({ padding: [80, 120, 80, 120] });
-      }, 150);
+      this.model.updateMetadata((metadata) => ({
+        ...metadata,
+        viewport: STATIC_VIEWPORT,
+      }));
     };
 
     this.api
       .fetchDiagram()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (response) => buildModel(response),
+        next: (response) => void buildModel(response),
         error: (err) => {
           const detail = err?.message ?? 'unknown error';
           this.error = `Unable to load diagram yet. Waiting for MCP server. (${detail})`;
@@ -546,5 +678,41 @@ export class GraphComponent implements OnInit {
           error: () => undefined,
         });
       });
+  }
+
+  buildRelationshipPath(graph: DiagramResponse, link: DiagramResponse['links'][number]): string {
+    const source = this.resolveLinkEndpoint(graph, link, 'source');
+    const target = this.resolveLinkEndpoint(graph, link, 'target');
+    const controlOffset = Math.max(90, (target.x - source.x) / 2);
+
+    return `M ${source.x} ${source.y} C ${source.x + controlOffset} ${source.y}, ${target.x - controlOffset} ${target.y}, ${target.x} ${target.y}`;
+  }
+
+  private resolveLinkEndpoint(
+    graph: DiagramResponse,
+    link: DiagramResponse['links'][number],
+    side: 'source' | 'target',
+  ): { x: number; y: number } {
+    const nodeId = side === 'source' ? link.source : link.target;
+    const node = graph.nodes.find((entry) => entry.id === nodeId);
+    const nodePosition = node?.position ?? fallbackPosition(graph.nodes.findIndex((entry) => entry.id === nodeId));
+
+    if (!node) {
+      return { x: 0, y: 0 };
+    }
+
+    const ports = buildEntityPorts(graph, node);
+    const portId = `${link.id}-${side}`;
+    const port =
+      side === 'source'
+        ? ports.rightPorts.find((entry) => entry.id === portId)
+        : ports.leftPorts.find((entry) => entry.id === portId);
+    const y = nodePosition.y + (ENTITY_NODE_SIZE.height * ((port?.offsetPercent ?? 50) / 100));
+    const x =
+      side === 'source'
+        ? nodePosition.x + ENTITY_NODE_SIZE.width + RELATIONSHIP_PORT_RENDER_SETTINGS.markerOffset
+        : nodePosition.x - RELATIONSHIP_PORT_RENDER_SETTINGS.markerOffset;
+
+    return { x, y };
   }
 }

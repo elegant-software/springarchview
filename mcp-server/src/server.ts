@@ -81,25 +81,12 @@ app.post('/api/diagram', async (req, res) => {
 // ── MCP Streamable HTTP transport (/mcp) ─────────────────────────────────────
 
 app.all('/mcp', async (req, res) => {
-  // Handle DELETE – terminate session
-  if (req.method === 'DELETE') {
-    const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    if (sessionId && mcpTransports[sessionId]) {
-      await mcpTransports[sessionId].close();
-      delete mcpTransports[sessionId];
-      res.status(200).json({ message: 'Session terminated' });
-    } else {
-      res.status(404).json({ error: 'Session not found' });
-    }
-    return;
-  }
-
   try {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
     if (sessionId && mcpTransports[sessionId]) {
-      // Reuse existing session
+      // Reuse existing session (handles POST, GET for SSE, DELETE)
       transport = mcpTransports[sessionId];
     } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
       // New session – create transport and wire up a fresh MCP server
@@ -128,6 +115,7 @@ app.all('/mcp', async (req, res) => {
       return;
     }
 
+    // Delegate all methods (POST, GET, DELETE) to the transport
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
     console.error('Error handling MCP request:', error);
